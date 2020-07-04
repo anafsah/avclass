@@ -13,7 +13,7 @@ from avclass_common import AvLabels
 from operator import itemgetter
 import evaluate_clustering as ec
 import json
-import traceback
+import traceback, pickle
 
 # Default alias file
 default_alias_file = os.path.join(path, "data/default.aliases")
@@ -95,158 +95,140 @@ def main(args):
     # Process each input file
     for ifile in ifile_l:
         # Open file
-        fd = open(ifile, 'r')
+        vt_rep = pickle.load(open(ifile, 'rb'))
 
-        # Debug info, file processed
-        sys.stderr.write('[-] Processing input file %s\n' % ifile)
-
-        # Process all lines in file
-        for line in fd:
-
-            # If blank line, skip
-            if line == '\n':
-                continue
-
-            # Debug info
-            if vt_all % 100 == 0:
-                sys.stderr.write('\r[-] %d JSON read' % vt_all)
-                sys.stderr.flush()
-            vt_all += 1
-
-            # Read JSON line and extract sample info (i.e., hashes and labels)
-            vt_rep = json.loads(line)
-            sample_info = get_sample_info(vt_rep)
-            if sample_info is None:
-                try:
-                    name = vt_rep['md5']
-                    sys.stderr.write('\nNo AV labels for %s\n' % name)
-                except KeyError:
-                    sys.stderr.write('\nCould not process: %s\n' % line)
-                sys.stderr.flush()
-                vt_empty += 1
-                continue
-
-            # Sample's name is selected hash type (md5 by default)
-            name = getattr(sample_info, hash_type)
-
-            # If the VT report has no AV labels, continue
-            if not sample_info[3]:
-                vt_empty += 1
-                sys.stderr.write('\nNo AV labels for %s\n' % name)
-                sys.stderr.flush()
-                continue
-            
-            # Get the distinct tokens from all the av labels in the report
-            # And print them. If not verbose, print the first token.
-            # If verbose, print the whole list
+        sample_info = get_sample_info(vt_rep)
+        if sample_info is None:
             try:
-                # Get distinct tokens from AV labels
-                tokens = list(av_labels.get_family_ranking(sample_info).items())
+                name = vt_rep['md5']
+                sys.stderr.write('\nNo AV labels for %s\n' % name)
+            except KeyError:
+                sys.stderr.write('\nCould not process: %s\n' % line)
+            sys.stderr.flush()
+            vt_empty += 1
+            continue
 
-                # If alias detection, populate maps
-                if args.aliasdetect:
-                    prev_tokens = set()
-                    for entry in tokens:
-                        curr_tok = entry[0]
-                        curr_count = token_count_map.get(curr_tok)
-                        if curr_count:
-                            token_count_map[curr_tok] = curr_count + 1
+        # Sample's name is selected hash type (md5 by default)
+        name = getattr(sample_info, hash_type)
+
+        # If the VT report has no AV labels, continue
+        if not sample_info[3]:
+            vt_empty += 1
+            sys.stderr.write('\nNo AV labels for %s\n' % name)
+            sys.stderr.flush()
+            continue
+
+        # Get the distinct tokens from all the av labels in the report
+        # And print them. If not verbose, print the first token.
+        # If verbose, print the whole list
+        try:
+            # Get distinct tokens from AV labels
+            tokens = list(av_labels.get_family_ranking(sample_info).items())
+
+            # If alias detection, populate maps
+            if args.aliasdetect:
+                prev_tokens = set()
+                for entry in tokens:
+                    curr_tok = entry[0]
+                    curr_count = token_count_map.get(curr_tok)
+                    if curr_count:
+                        token_count_map[curr_tok] = curr_count + 1
+                    else:
+                        token_count_map[curr_tok] = 1
+                    for prev_tok in prev_tokens:
+                        if prev_tok < curr_tok:
+                            pair = (prev_tok,curr_tok) 
+                        else: 
+                            pair = (curr_tok,prev_tok)
+                        pair_count = pair_count_map.get(pair)
+                        if pair_count:
+                            pair_count_map[pair] = pair_count + 1
                         else:
-                            token_count_map[curr_tok] = 1
-                        for prev_tok in prev_tokens:
-                            if prev_tok < curr_tok:
-                                pair = (prev_tok,curr_tok) 
-                            else: 
-                                pair = (curr_tok,prev_tok)
-                            pair_count = pair_count_map.get(pair)
-                            if pair_count:
-                                pair_count_map[pair] = pair_count + 1
-                            else:
-                                pair_count_map[pair] = 1
-                        prev_tokens.add(curr_tok)
+                            pair_count_map[pair] = 1
+                    prev_tokens.add(curr_tok)
 
-                # If generic token detection, populate map
-                if args.gendetect and args.gt:
-                    for entry in tokens:
-                        curr_tok = entry[0]
-                        curr_fam_set = token_family_map.get(curr_tok)
-                        family = gt_dict[name] if name in gt_dict else None
-                        if curr_fam_set and family:
-                            curr_fam_set.add(family)
-                        elif family:
-                            token_family_map[curr_tok] = set(family)
+            # If generic token detection, populate map
+            if args.gendetect and args.gt:
+                for entry in tokens:
+                    curr_tok = entry[0]
+                    curr_fam_set = token_family_map.get(curr_tok)
+                    family = gt_dict[name] if name in gt_dict else None
+                    if curr_fam_set and family:
+                        curr_fam_set.add(family)
+                    elif family:
+                        token_family_map[curr_tok] = set(family)
 
-                # Top candidate is most likely family name
-                if tokens:
-                    family = tokens[0][0]
-                    is_singleton = False
+            # Top candidate is most likely family name
+            if tokens:
+                family = tokens[0][0]
+                is_singleton = False
+            else:
+                family = "SINGLETON:" + name
+                is_singleton = True
+                singletons += 1
+
+            # Check if sample is PUP, if requested
+            if args.pup:
+                is_pup = av_labels.is_pup(sample_info[3])
+                if is_pup:
+                    is_pup_str = "\t1"
                 else:
-                    family = "SINGLETON:" + name
-                    is_singleton = True
-                    singletons += 1
+                    is_pup_str = "\t0"
+            else:
+                is_pup = None
+                is_pup_str =  ""
 
-                # Check if sample is PUP, if requested
+            # Build family map for precision, recall, computation
+            first_token_dict[name] = family
+
+            # Get ground truth family, if available
+            if args.gt:
+                gt_family = '\t' + gt_dict[name] if name in gt_dict else ""
+            else:
+                gt_family = ""
+
+            # Print family (and ground truth if available) to stdout
+            sys.stdout.write('%s\t%s%s%s\n' % (name, family, gt_family, 
+                                                is_pup_str))
+
+            # If verbose, print tokens (and ground truth if available) 
+            # to log file
+            if args.verbose:
+                verb_fd.write('%s\t%s%s%s\n' % (
+                    name, tokens, gt_family, is_pup_str))
+
+            # Store family stats (if required)
+            if args.fam:
+                if is_singleton:
+                    ff = 'SINGLETONS'
+                else:
+                    ff = family
+                try:
+                    numAll, numMal, numPup = fam_stats[ff]
+                except KeyError:
+                    numAll = 0
+                    numMal = 0
+                    numPup = 0
+
+                numAll += 1
                 if args.pup:
-                    is_pup = av_labels.is_pup(sample_info[3])
                     if is_pup:
-                        is_pup_str = "\t1"
+                        numPup += 1
                     else:
-                        is_pup_str = "\t0"
-                else:
-                    is_pup = None
-                    is_pup_str =  ""
+                        numMal += 1
+                fam_stats[ff] = (numAll, numMal, numPup)
 
-                # Build family map for precision, recall, computation
-                first_token_dict[name] = family
+        except:
+            traceback.print_exc(file=sys.stderr)
+            continue
 
-                # Get ground truth family, if available
-                if args.gt:
-                    gt_family = '\t' + gt_dict[name] if name in gt_dict else ""
-                else:
-                    gt_family = ""
+    # Debug info
+    sys.stderr.write('\r[-] %d JSON read' % vt_all)
+    sys.stderr.flush()
+    sys.stderr.write('\n')
 
-                # Print family (and ground truth if available) to stdout
-                sys.stdout.write('%s\t%s%s%s\n' % (name, family, gt_family, 
-                                                    is_pup_str))
-
-                # If verbose, print tokens (and ground truth if available) 
-                # to log file
-                if args.verbose:
-                    verb_fd.write('%s\t%s%s%s\n' % (
-                        name, tokens, gt_family, is_pup_str))
-
-                # Store family stats (if required)
-                if args.fam:
-                    if is_singleton:
-                        ff = 'SINGLETONS'
-                    else:
-                        ff = family
-                    try:
-                        numAll, numMal, numPup = fam_stats[ff]
-                    except KeyError:
-                        numAll = 0
-                        numMal = 0
-                        numPup = 0
-
-                    numAll += 1
-                    if args.pup:
-                        if is_pup:
-                            numPup += 1
-                        else:
-                            numMal += 1
-                    fam_stats[ff] = (numAll, numMal, numPup)
-
-            except:
-                traceback.print_exc(file=sys.stderr)
-                continue
-
-        # Debug info
-        sys.stderr.write('\r[-] %d JSON read' % vt_all)
-        sys.stderr.flush()
-        sys.stderr.write('\n')
-
-        # Close file
-        fd.close()
+    # Close file
+    fd.close()
 
     # Print statistics
     sys.stderr.write(
